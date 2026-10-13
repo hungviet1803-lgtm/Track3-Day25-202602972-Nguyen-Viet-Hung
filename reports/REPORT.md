@@ -1,6 +1,6 @@
 # Lab 25B — Report
 
-**Họ tên / nhóm:** Nguyen Viet Hung — MSV 202602972  **Commit:** _(điền hash sau khi push)_  **Điểm tự động (`make grade`):** 84 / 88 (4 điểm còn lại là dữ liệu SLO ẩn do giảng viên chấm)
+**Họ tên / nhóm:** Nguyen Viet Hung — MSV 202602972  **Commit:** `6c3332bbd900281f5cd756d2c71338c63ed3435b`  **Điểm tự động (`make grade`):** 84 / 88 (4 điểm còn lại là dữ liệu SLO ẩn do giảng viên chấm)
 
 > Số liệu lấy từ `reports/gameday/*.json`, `reports/cache/*.json`, `reports/workflows.json`, `reports/slo.json`
 > (seed 25 trừ khi ghi khác). `make grade --seeds 25,26,27`: 6/6 băng + C1 PASS trên cả 3 seed.
