@@ -21,8 +21,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from gameday_lab.workflows.runner import STEPS, RefundRequest  # noqa: F401  (STEPS: use it in run())
-from gameday_lab.workflows.services import DurableStore, ServiceError, Services, ServiceTimeout  # noqa: F401
+from gameday_lab.retry import FullJitterBackoff
+from gameday_lab.workflows.runner import STEPS, RefundRequest
+from gameday_lab.workflows.services import DurableStore, ServiceError, Services, ServiceTimeout
 
 T = TypeVar("T")
 
@@ -30,24 +31,44 @@ T = TypeVar("T")
 def idempotency_key(req: RefundRequest, step: str) -> str:
     """TODO(student): a key that is identical for every retry / restart of the same
     side effect of the same session, and different across sessions and steps."""
-    raise NotImplementedError("TODO(student): idempotency_key()")
+    # derived only from *what* is being done: every retry and every restarted worker rebuilds the same key
+    return f"refund-agent:{req.session_id}:{step}"
 
 
 def checkpoint_key(req: RefundRequest, step: str) -> str:
     """TODO(student): DurableStore key under which the result of ``step`` is saved."""
-    raise NotImplementedError("TODO(student): checkpoint_key()")
+    return f"wf/{req.session_id}/{step}"
 
 
 class WorkflowExecutor:
-    def __init__(self, services: Services, store: DurableStore, max_attempts: int = 5) -> None:
+    def __init__(self, services: Services, store: DurableStore, max_attempts: int = 5,
+                 backoff: FullJitterBackoff | None = None, sleep: Callable[[float], None] | None = None) -> None:
         self.s = services
         self.store = store
         self.max_attempts = max_attempts
+        # retries back off with full jitter, like the LLM client: an immediate retry against a struggling
+        # payment API is a small retry storm. Production passes time.sleep; the simulated services have
+        # no clock, so by default the delay is only accounted for (backoff_s), not slept.
+        self.backoff = backoff or FullJitterBackoff(base_s=0.2, cap_s=5.0)
+        self.sleep = sleep
+        self.backoff_s = 0.0
 
     def _retry(self, fn: Callable[[], T]) -> T:
         """TODO(student): call fn(); retry on ServiceError / ServiceTimeout up to
         ``max_attempts`` times (re-raise the last one). Never catch WorkerCrash."""
-        raise NotImplementedError("TODO(student): _retry()")
+        last: ServiceError | ServiceTimeout | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                return fn()
+            except (ServiceError, ServiceTimeout) as exc:  # WorkerCrash is a BaseException: it passes through
+                last = exc
+            if attempt < self.max_attempts:
+                delay = self.backoff.delay(attempt)
+                self.backoff_s += delay
+                if self.sleep is not None:
+                    self.sleep(delay)
+        assert last is not None
+        raise last
 
     def _step(self, req: RefundRequest, state: dict[str, Any], step: str) -> Any:
         """PROVIDED: execute one step. ``state`` holds results of earlier steps."""
@@ -75,4 +96,16 @@ class WorkflowExecutor:
         * otherwise execute it with ``self._step`` and checkpoint the result
         * return {"status": "done", **state}
         """
-        raise NotImplementedError("TODO(student): run()")
+        state: dict[str, Any] = {}
+        for step in STEPS:
+            key = checkpoint_key(req, step)
+            saved = self.store.get(key)
+            if saved is not None:  # a previous worker finished this step before it died
+                state[step] = saved["result"]
+                continue
+            result = self._step(req, state, step)
+            # checkpoint only AFTER the step succeeded: a crash in between re-runs the step,
+            # and the idempotency key turns that re-run into a no-op for payments / e-mail
+            self.store.put(key, {"result": result})
+            state[step] = result
+        return {"status": "done", **state}

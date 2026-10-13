@@ -28,24 +28,29 @@ fallback_order: [alpha, alpha-eu, beta, gamma-mini]
 # YOUR client settings (read by ResilientClient). Tune them, explain them.
 # ----------------------------------------------------------------------------
 client:
-  attempt_timeout_s: 8.0
-  max_attempts_per_provider: 2      # 1 retry on the same provider, then fail over
+  attempt_timeout_s: 8.0            # > beta p99 under load; leaves time for 2+ failovers in 30 s (30 s fails G6)
+  max_attempts_per_provider: 2      # 1 retry on the same provider for 529/503/500, then fail over
   min_time_left_s: 1.0              # don't start an attempt that cannot finish
+  retry_on_timeout: false           # a timeout already cost 8 s: fail over instead of waiting on the same queue
+  rate_limit_jitter_s: 0.5          # spread calls waiting for a 429 cooldown over the next 1 s window
+  reserve_tool_capacity: true       # last tool-capable provider left -> chat goes to gamma-mini (G6 429s 178 -> 8)
+  slow_fallback: true               # all providers refused only for SLOWNESS -> send anyway (all +4 s: 0.71 -> 1.0)
   backoff_base_s: 0.25
   backoff_cap_s: 4.0
   retry_budget_ratio: 0.1           # retries <= ~10% of first attempts
   retry_budget_min_per_s: 0.5
   retry_budget_max_tokens: 20
-  quota_cooldown_s: 300
+  quota_cooldown_s: 300             # quota is billing: re-probing every 30 s only adds 429s (G5: 2 -> 21)
   breaker:
-    window_size: 20
-    min_calls: 10
+    window_size: 10                 # 8 calls/s: 10 results ~ 1.3 s of traffic (G2 p95 9.9 -> 8.1 s)
+    min_calls: 5
     failure_rate_threshold: 0.5
-    slow_call_s: 5.0
+    slow_call_s: 5.0                # normal p99 <= 4.1 s (beta); G4 adds 5 s. 8 s misses G4 (p95 13.8 s)
     slow_rate_threshold: 0.6
-    open_duration_s: 10.0
+    open_duration_s: 10.0           # short: traffic is back on alpha well inside restore + 60 s
     half_open_max_probes: 2
     half_open_successes: 2
+    # unhealthy_rate_threshold (failed or slow) defaults to max(failure, slow) thresholds = 0.6
 
 # ----------------------------------------------------------------------------
 # Part G: YOUR semantic cache settings (read by SemanticCache).
@@ -53,7 +58,7 @@ client:
 # wrong_answers_by_reason, tune each value and justify it in report section 8.
 # ----------------------------------------------------------------------------
 cache:
-  similarity_threshold: 0.80
-  ttl_s: 600
-  max_stale_s: 0
+  similarity_threshold: 0.92   # paraphrases >= 0.951, different intents <= 0.862 (measured on the catalog)
+  ttl_s: 60                    # bounds answers served after a SILENT doc change (outdated <= 5 on 5 seeds)
+  max_stale_s: 600             # stale-if-error must outlast an outage (C1: 120 s) plus the TTL
   max_entries: 500
